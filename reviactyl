@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Pterodactyl + Reviactyl + Wings (auto installer)
+# Panel: panel.fivem-node.nl
+# Node: node01.fivem-node.nl
+# Admin login:
+#   Admin / Lu12ca!!
+# Email: ✱✱✱ Zelf invullen onderaan CERTBOT
+# ---------------------------------------------
+
+set -e
+PANEL_DOMAIN="panel.fivem-node.nl"
+NODE_DOMAIN="node01.fivem-node.nl"
+DB_NAME="pterodactyl"
+DB_USER="ptero"
+DB_PASS="StrongPassword123" # mag je later wijzigen!
+WEBROOT="/var/www/pterodactyl"
+
+echo "=== START INSTALL ==="
+
+if [ "$(id -u)" != 0 ]; then
+    echo "[ERROR] Run as root"
+    exit 1
+fi
+
+apt update -y
+apt install -y curl wget git unzip software-properties-common ca-certificates apt-transport-https lsb-release gnupg
+
+# PHP toevoegen
+add-apt-repository ppa:ondrej/php -y
+apt update -y
+apt install -y php8.2 php8.2-{cli,common,gd,mysql,mbstring,bcmath,xml,curl,zip,fpm}
+
+# MySQL + Redis
+apt install -y mysql-server redis-server
+
+mysql -u root <<EOF
+CREATE DATABASE ${DB_NAME};
+CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+
+# Panel download
+mkdir -p ${WEBROOT}
+cd ${WEBROOT}
+curl -sLo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
+tar -xzvf panel.tar.gz
+rm panel.tar.gz
+
+cp .env.example .env
+sed -i "s/APP_URL=.*/APP_URL=https:\/\/${PANEL_DOMAIN}/" .env
+sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
+sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
+sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
+
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+
+composer install --no-dev --optimize-autoloader
+php artisan key:generate --force
+php artisan migrate --seed --force
+
+# Admin aanmaken
+php artisan p:user:make \
+    --email="admin@admin.com" \
+    --username="Admin" \
+    --name-first="Server" \
+    --name-last="admin" \
+    --password="Lu12ca!!" \
+    --admin=1
+
+chown -R www-data:www-data ${WEBROOT}
+chmod -R 755 ${WEBROOT}/storage ${WEBROOT}/bootstrap/cache
+
+# NGINX INSTALL
+apt install -y nginx
+rm -f /etc/nginx/sites-enabled/default
+
+cat > /etc/nginx/sites-available/pterodactyl.conf <<NGINX
+server {
+    listen 80;
+    server_name ${PANEL_DOMAIN};
+    root ${WEBROOT}/public;
+    index index.php;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+}
+NGINX
+
+ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+systemctl restart nginx
+
+# SSL — EMAIL zelf invullen!
+apt install -y certbot python3-certbot-nginx
+certbot --nginx -d ${PANEL_DOMAIN} -m CHANGE-ME@YOURDOMAIN.COM --agree-tos --redirect --non-interactive
+
+echo "[PANEL READY ✅] → https://${PANEL_DOMAIN}"
+
+# =========================
+#   Wings NODE installatie
+# =========================
+
+ssh root@${NODE_DOMAIN} bash -s <<'EOF'
+apt update -y
+apt install -y curl wget
+curl -sSL https://get.docker.com/ | bash
+systemctl enable --now docker
+
+mkdir -p /etc/pterodactyl
+curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64"
+chmod +x /usr/local/bin/wings
+
+echo "⚠️ Node Token + config.yml moet nog handmatig worden toegevoegd!"
+echo "Open Panel → Nodes → node01 → Configure → en kopieer naar /etc/pterodactyl/config.yml"
+
+EOF
+
+echo "=== installatie voltooid ✅ ==="
+echo "Panel: https://${PANEL_DOMAIN}"
+echo "Login:"
+echo "  Email: (die jij zelf moet instellen)"
+echo "  User: Admin"
+echo "  Pass: Lu12ca!!"
+echo "Wings token later via panel toevoegen!"
